@@ -1,0 +1,10 @@
+Package: bollettachiara
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Enkas79 <enkas79@gmail.com>
+Description: Analizzatore bollette Luce, Gas e Acqua da PDF
+ BollettaChiara estrae i dati dalle bollette PDF (Luce, Gas, Acqua),
+ mostra tabella e grafici di andamento costi/consumi e permette
+ l'export di un riepilogo in PDF.

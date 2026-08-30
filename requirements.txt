@@ -1,0 +1,4 @@
+PyQt6
+pdfplumber
+matplotlib
+reportlab

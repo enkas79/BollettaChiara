@@ -340,6 +340,24 @@ class EnergiaTab(QWidget):
             except Exception:
                 pass
 
+        # Formato Enel: "Periodo di riferimento gennaio - febbraio 2014" (mesi testuali,
+        # non date numeriche) — va controllato prima del fallback numerico generico
+        # sennò questo intercetta erroneamente altre finestre di date in bolletta
+        # (es. "può comunicare la lettura del contatore dal ... al ...").
+        mesi_alt = "gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre"
+        pat_periodo_mese = re.compile(
+            rf"Periodo(?:\s+di\s+riferimento)?\s+({mesi_alt})\s*[-–]?\s*(?:{mesi_alt})?\s+(20\d{{2}})",
+            re.IGNORECASE)
+        match_periodo_mese = pat_periodo_mese.search(testo)
+        if match_periodo_mese:
+            nm = match_periodo_mese.group(1).lower()
+            anno = match_periodo_mese.group(2)
+            try:
+                idx = {m.lower(): i for i, m in enumerate(nomi_mesi) if m}[nm]
+                return date(int(anno), idx, 1), f"{nm.capitalize()} {anno}"
+            except Exception:
+                pass
+
         # NB: pattern generico "dd/mm/yyyy al dd/mm/yyyy" — usato come fallback perché
         # può intercettare per errore altre finestre di date presenti in bolletta
         # (es. "prossima autolettura dal ... al ...") invece del vero periodo fatturato.
@@ -403,7 +421,7 @@ class EnergiaTab(QWidget):
         gas_totale = converti_numero(m_gas_tot.group(1))
         luce_totale = round(importo_totale - gas_totale, 2)
 
-        m_rai = re.search(r"canone\s+(rai|tv|abbonamento).*?(\d{1,3}[.,]\d{2})", testo, re.IGNORECASE)
+        m_rai = re.search(r"canone\s+(?:di\s+)?(rai|tv|abbonamento).*?(\d{1,3}[.,]\d{2})", testo, re.IGNORECASE)
         rai = converti_numero(m_rai.group(2)) if m_rai else 0.0
         if rai >= luce_totale:
             rai = 0.0
@@ -420,7 +438,7 @@ class EnergiaTab(QWidget):
         match_list = regex_totale.findall(testo)
         val_lordo = max([converti_numero(m[1]) for m in match_list]) if match_list else 0.0
 
-        regex_rai = re.compile(r"(canone\s+(rai|tv|abbonamento)).*?(\d{1,3}[.,]\d{2})", re.IGNORECASE)
+        regex_rai = re.compile(r"(canone\s+(?:di\s+)?(rai|tv|abbonamento)).*?(\d{1,3}[.,]\d{2})", re.IGNORECASE)
         m_rai = regex_rai.search(testo)
         val_rai = converti_numero(m_rai.group(3)) if m_rai else 0.0
         if val_rai >= val_lordo:
@@ -433,17 +451,37 @@ class EnergiaTab(QWidget):
         reg_gas_pulsee = re.compile(r"CONSUMI\s+FATTURATI\s+IN\s+TOTALE.*?IN\s+QUESTA\s+BOLLETTA:?\s*(\d+[.,]\d+)\s*(smc|mc|kwh)", re.DOTALL | re.IGNORECASE)
         m_gas = reg_gas_pulsee.search(testo)
 
+        # Formato Enel: "Consumo Fatturato kWh 379" (unità PRIMA del numero); usa questo
+        # pattern per primo perché "consumi fatturati" da solo può agganciare per errore
+        # etichette come "F1 kWh" nella tabella delle letture.
+        reg_consumo_fatturato = re.compile(r"consumo\s+fatturato\s*(kwh|smc|mc)\D{0,15}(\d{1,5}(?:[.,]\d{1,2})?)", re.IGNORECASE | re.DOTALL)
+        m_consumo_fatt = reg_consumo_fatturato.search(testo)
+
         reg_std = re.compile(r"(?:consumi\s+fatturati|consumo\s+totale|totale\s+consumi).*?(\d{1,5}(?:[.,]\d{1,2})?)\s*(kwh|smc|mc)", re.IGNORECASE | re.DOTALL)
         m_std = reg_std.search(testo)
+
+        # Formato Ascotrade: "TOTALE CONSUMO FATTURATO 400,00" senza unità di misura
+        # adiacente al numero (l'unità compare solo più avanti, es. "Euro/Kwh").
+        reg_tot_fatturato = re.compile(r"totale\s+consumo\s+fatturato\D{0,5}(\d{1,5}[.,]\d{1,2})(.{0,80})", re.IGNORECASE | re.DOTALL)
+        m_tot_fatt = reg_tot_fatturato.search(testo)
 
         if m_gas:
             consumo = converti_numero(m_gas.group(1))
             unita = m_gas.group(2).lower()
             msg = "Gas Pulsee"
+        elif m_consumo_fatt:
+            consumo = converti_numero(m_consumo_fatt.group(2))
+            unita = m_consumo_fatt.group(1).lower()
+            msg = "Consumo Fatturato"
         elif m_std:
             consumo = converti_numero(m_std.group(1))
             unita = m_std.group(2).lower()
             msg = "Standard"
+        elif m_tot_fatt:
+            consumo = converti_numero(m_tot_fatt.group(1))
+            unita_match = re.search(r"kwh|smc|mc", m_tot_fatt.group(2), re.IGNORECASE)
+            unita = unita_match.group(0).lower() if unita_match else "kwh"
+            msg = "Totale Consumo Fatturato"
         else:
             reg_fasce = re.compile(r"F1.*?(\d+[.,]\d+).*?F2.*?(\d+[.,]\d+).*?F3.*?(\d+[.,]\d+)", re.DOTALL | re.IGNORECASE)
             m_fasce = reg_fasce.search(testo)

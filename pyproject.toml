@@ -1,0 +1,25 @@
+[project]
+name = "bollettachiara"
+description = "Analizzatore bollette Luce, Gas e Acqua da PDF"
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+dependencies = []
+
+[project.optional-dependencies]
+gui = [
+    "PyQt6",
+    "pdfplumber",
+    "matplotlib",
+    "reportlab",
+]
+
+[tool.setuptools]
+packages = ["bollettachiara"]
+
+[tool.setuptools.dynamic]
+version = { file = "version.txt" }
+
+[build-system]
+requires = ["setuptools>=66"]
+build-backend = "setuptools.build_meta"

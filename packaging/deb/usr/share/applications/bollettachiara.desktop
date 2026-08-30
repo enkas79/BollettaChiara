@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=BollettaChiara
+Comment=Analizzatore bollette Luce, Gas e Acqua
+Exec=/usr/bin/bollettachiara
+Terminal=false
+Type=Application
+Categories=Office;Finance;

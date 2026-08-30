@@ -1,25 +1,18 @@
 name: Build Installers
 
-# Adattato dal workflow generico "buildinstallers.yml" per BollettaChiara:
-# si attiva quando version.txt cambia su main, costruisce installer Windows
-# (.exe via NSIS), macOS (.dmg) e Debian/Ubuntu (.deb) e li allega a una
-# GitHub Release taggata vX.Y.Z.
+# Si attiva quando version.txt cambia su master, costruisce installer
+# Windows (.exe via NSIS), macOS (.dmg) e Debian/Ubuntu (.deb) tramite
+# PyInstaller e li allega a una GitHub Release taggata vX.Y.Z.
 #
-# PREREQUISITI NON ANCORA PRESENTI NEL REPO (da creare prima che questo
-# workflow possa girare con successo):
-#   - main.py                              entry point unificato dell'app
-#   - pyproject.toml con extra "[gui]"     (PyQt6, pdfplumber, matplotlib, reportlab)
-#   - src/bollettachiara/gui/icon.ico      icona applicazione
-#   - packaging/windows/installer.nsi      script NSIS
-#   - packaging/deb/DEBIAN/control         (placeholder __VERSION__)
-#   - packaging/deb/usr/share/applications/bollettachiara.desktop
-# Finché questi file non esistono i job build-windows/build-macos/build-deb
-# falliranno: il trigger su version.txt resta comunque valido per quando la
-# struttura di packaging sarà pronta.
+# Nessuna icona applicazione è ancora presente nel progetto: i comandi
+# PyInstaller qui sotto non ne referenziano una. Per aggiungerne una in
+# futuro: mettere il file .ico/.icns in bollettachiara/, aggiungere
+# --icon <path> e --add-data "<path>;." (":." su macOS/Linux) ai comandi
+# pyinstaller sotto.
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - version.txt
   workflow_dispatch: {}
@@ -48,7 +41,7 @@ jobs:
       - run: pip install -e ".[gui]" pyinstaller
       # onedir (default, senza --onefile): una vera cartella applicazione
       # sotto Program Files; NSIS impacchetta l'intera dist\BollettaChiara\.
-      - run: pyinstaller --noconfirm --windowed --name BollettaChiara --copy-metadata BollettaChiara --add-data "version.txt;." --add-data "src/bollettachiara/gui/icon.ico;." main.py
+      - run: pyinstaller --noconfirm --windowed --name BollettaChiara --copy-metadata bollettachiara --add-data "version.txt;." main.py
       - name: Install NSIS
         run: |
           choco install nsis -y
@@ -69,7 +62,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[gui]" pyinstaller
-      - run: pyinstaller --noconfirm --windowed --name BollettaChiara --copy-metadata BollettaChiara --add-data "version.txt:." --add-data "src/bollettachiara/gui/icon.ico:." main.py
+      - run: pyinstaller --noconfirm --windowed --name BollettaChiara --copy-metadata bollettachiara --add-data "version.txt:." main.py
       - name: Build dmg
         run: |
           hdiutil create -volname "BollettaChiara" -srcfolder dist/BollettaChiara.app -ov -format UDZO \
@@ -88,7 +81,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[gui]" pyinstaller
-      - run: pyinstaller --noconfirm --onefile --name bollettachiara --copy-metadata BollettaChiara --add-data "version.txt:." --add-data "src/bollettachiara/gui/icon.ico:." main.py
+      - run: pyinstaller --noconfirm --onefile --name bollettachiara --copy-metadata bollettachiara --add-data "version.txt:." main.py
       - name: Assemble .deb tree
         run: |
           VERSION="${{ needs.version.outputs.version }}"

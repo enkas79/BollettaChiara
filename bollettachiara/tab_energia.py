@@ -340,6 +340,23 @@ class EnergiaTab(QWidget):
             except Exception:
                 pass
 
+        # Formato Eni: "Periodo di riferimento da 3 Febbraio 2018 a 23 Marzo 2018"
+        # (giorno numerico + mese testuale) — controllato prima del fallback numerico
+        # generico sennò questo intercetta erroneamente altre date in bolletta (es.
+        # "prossima bolletta prevista per il ...").
+        mesi_alt_eni = "gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre"
+        pat_periodo_riferimento = re.compile(
+            rf"Periodo\s+di\s+riferimento.{{0,40}}?da\s+(\d{{1,2}})\s+({mesi_alt_eni})\s+(20\d{{2}})",
+            re.IGNORECASE | re.DOTALL)
+        match_periodo_riferimento = pat_periodo_riferimento.search(testo)
+        if match_periodo_riferimento:
+            gg, nm, anno = match_periodo_riferimento.group(1), match_periodo_riferimento.group(2).lower(), match_periodo_riferimento.group(3)
+            try:
+                idx = {m.lower(): i for i, m in enumerate(nomi_mesi) if m}[nm]
+                return date(int(anno), idx, int(gg)), f"{nm.capitalize()} {anno}"
+            except Exception:
+                pass
+
         # Formato Enel: "Periodo di riferimento gennaio - febbraio 2014" (mesi testuali,
         # non date numeriche) — va controllato prima del fallback numerico generico
         # sennò questo intercetta erroneamente altre finestre di date in bolletta
@@ -415,7 +432,7 @@ class EnergiaTab(QWidget):
         m_luce_kwh = re.search(r"CONSUMO LUCE.*?(\d+(?:[.,]\d+)?)\s*kWh", testo, re.DOTALL | re.IGNORECASE)
 
         if not (m_importo and m_gas_tot and m_gas_smc and m_luce_kwh):
-            return None
+            return self._estrai_dati_luce_gas_eni(testo)
 
         importo_totale = converti_numero(m_importo.group(1))
         gas_totale = converti_numero(m_gas_tot.group(1))
@@ -431,6 +448,41 @@ class EnergiaTab(QWidget):
              "consumo": converti_numero(m_gas_smc.group(1)), "unita": "smc", "msg": "Gas (bolletta duale)"},
             {"lordo": luce_totale, "rai": rai, "netto": luce_totale - rai,
              "consumo": converti_numero(m_luce_kwh.group(1)), "unita": "kwh", "msg": "Luce (bolletta duale)"},
+        ]
+
+    def _estrai_dati_luce_gas_eni(self, testo):
+        """Estrae luce e gas da una bolletta unica in stile Eni gas e luce.
+
+        Formato diverso da ENGIE: niente "IMPORTO DA PAGARE" né "TOTALE
+        FORNITURA SALVO CONGUAGLIO". Il riepilogo di pagina 1 ("Consumo gas
+        ... Consumo luce ...") in queste bollette ha un layout a due colonne
+        che pdfplumber estrae interlacciato con testo di un riquadro laterale,
+        quindi si usano invece gli importi/consumi del dettaglio di pagina 2
+        ("Totale gas** 99,41 €", "Totale fornitura gas smc 127", "Totale
+        luce** 75,55 €", "Totale fornitura luce kWh 393"), su una sola colonna
+        e quindi affidabili.
+        """
+        m_gas_tot = re.search(r"Totale\s+gas\**\s*(\d{1,4}[.,]\d{2})\s*€", testo, re.IGNORECASE)
+        m_gas_smc = re.search(r"Totale\s+fornitura\s+gas\s+smc\s*(\d+(?:[.,]\d+)?)", testo, re.IGNORECASE)
+        m_luce_tot = re.search(r"Totale\s+luce\**\s*(\d{1,4}[.,]\d{2})\s*€", testo, re.IGNORECASE)
+        m_luce_kwh = re.search(r"Totale\s+fornitura\s+luce\s+kWh\s*(\d+(?:[.,]\d+)?)", testo, re.IGNORECASE)
+
+        if not (m_gas_tot and m_gas_smc and m_luce_tot and m_luce_kwh):
+            return None
+
+        gas_totale = converti_numero(m_gas_tot.group(1))
+        luce_netto = converti_numero(m_luce_tot.group(1))
+
+        m_rai = re.search(r"canone\s+(?:di\s+)?(rai|tv|abbonamento).*?(\d{1,3}[.,]\d{2})", testo, re.IGNORECASE)
+        rai = converti_numero(m_rai.group(2)) if m_rai else 0.0
+
+        luce_totale = round(luce_netto + rai, 2)
+
+        return [
+            {"lordo": gas_totale, "rai": 0.0, "netto": gas_totale,
+             "consumo": converti_numero(m_gas_smc.group(1)), "unita": "smc", "msg": "Gas (bolletta duale Eni)"},
+            {"lordo": luce_totale, "rai": rai, "netto": luce_netto,
+             "consumo": converti_numero(m_luce_kwh.group(1)), "unita": "kwh", "msg": "Luce (bolletta duale Eni)"},
         ]
 
     def estrai_dati_completi(self, testo):

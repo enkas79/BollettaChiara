@@ -207,30 +207,31 @@ class EnergiaTab(QWidget):
         for path in file_paths:
             nome_file = path.split("/")[-1]
             testo = estrai_testo(path)
-
-            dati = self.estrai_dati_completi(testo)
             data_obj, display = self.estrai_data_competenza(testo)
 
-            if dati['rai'] > 0:
-                trovato_rai = True
+            for dati in self.estrai_dati_bolletta(testo):
+                if dati['rai'] > 0:
+                    trovato_rai = True
 
-            if dati['unita'] == 'kwh':
-                conta_kwh += 1
-                unita_rilevata = 'kwh'
-            elif dati['unita'] in ['smc', 'mc']:
-                conta_smc += 1
-                unita_rilevata = 'smc'
+                if dati['unita'] == 'kwh':
+                    conta_kwh += 1
+                    unita_rilevata = 'kwh'
+                elif dati['unita'] in ['smc', 'mc']:
+                    conta_smc += 1
+                    unita_rilevata = 'smc'
 
-            record = {
-                'data_sort': data_obj,
-                'display': display if display else nome_file,
-                'lordo': dati['lordo'], 'rai': dati['rai'], 'netto': dati['netto'],
-                'consumo': dati['consumo'], 'unita': dati['unita'], 'msg': dati['msg'],
-                'nome_file': nome_file
-            }
-            temp_list.append(record)
+                record = {
+                    'data_sort': data_obj,
+                    'display': display if display else nome_file,
+                    'lordo': dati['lordo'], 'rai': dati['rai'], 'netto': dati['netto'],
+                    'consumo': dati['consumo'], 'unita': dati['unita'], 'msg': dati['msg'],
+                    'nome_file': nome_file
+                }
+                temp_list.append(record)
 
-        if conta_kwh > conta_smc:
+        if conta_kwh > 0 and conta_smc > 0:
+            self.tipo_bolletta = "Luce e Gas"
+        elif conta_kwh > conta_smc:
             self.tipo_bolletta = "Luce"
         elif conta_smc > 0:
             self.tipo_bolletta = "Gas"
@@ -330,6 +331,18 @@ class EnergiaTab(QWidget):
             except Exception:
                 pass
 
+        pat_fatturazione = re.compile(r"Periodo\s+di\s+fatturazione\s*:?\s*dal\s*(\d{1,2})[./](\d{1,2})[./](\d{2,4})\s*al\s*(\d{1,2})[./](\d{1,2})[./](\d{2,4})", re.IGNORECASE)
+        match_fatturazione = pat_fatturazione.search(testo)
+        if match_fatturazione:
+            d, m, y = match_fatturazione.group(1), match_fatturazione.group(2), match_fatturazione.group(3)
+            try:
+                return date(int(y), int(m), int(d)), f"{nomi_mesi[int(m)]} {y}"
+            except Exception:
+                pass
+
+        # NB: pattern generico "dd/mm/yyyy al dd/mm/yyyy" — usato come fallback perché
+        # può intercettare per errore altre finestre di date presenti in bolletta
+        # (es. "prossima autolettura dal ... al ...") invece del vero periodo fatturato.
         pat_range = re.compile(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s*(?:al|-)\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})", re.IGNORECASE)
         match_range = pat_range.search(testo)
         if match_range:
@@ -351,6 +364,56 @@ class EnergiaTab(QWidget):
             return date(int(anno), idx, 1), f"{nm.capitalize()} {anno}"
 
         return date(2999, 1, 1), None
+
+    def estrai_dati_bolletta(self, testo):
+        """Restituisce una lista di dict dati estratti dal testo del PDF.
+
+        Normalmente una sola bolletta (un solo tipo di utenza) -> un solo
+        elemento. Alcuni fornitori (es. ENGIE) emettono un'unica bolletta
+        che copre sia luce che gas: in quel caso vengono restituiti due
+        elementi (uno per la fornitura gas, uno per quella elettrica).
+        """
+        if re.search(r"CONSUMO GAS", testo, re.IGNORECASE) and re.search(r"CONSUMO LUCE", testo, re.IGNORECASE):
+            dati_duali = self._estrai_dati_luce_gas_combinata(testo)
+            if dati_duali:
+                return dati_duali
+        return [self.estrai_dati_completi(testo)]
+
+    def _estrai_dati_luce_gas_combinata(self, testo):
+        """Estrae luce e gas da una bolletta unica in stile ENGIE.
+
+        La prima pagina riporta un riepilogo con l'importo totale e i due
+        consumi (es. "IMPORTO DA PAGARE ... CONSUMO GAS" seguito da
+        "491,05 € ... 136 smc", e più sotto "CONSUMO LUCE" con "461 kWh").
+        Il totale della fornitura gas si legge dal dettaglio ("TOTALE
+        FORNITURA SALVO CONGUAGLIO € 246,67"); il totale della fornitura
+        elettrica (canone RAI incluso) si ricava per differenza dal totale
+        bolletta, evitando di dipendere da pagine successive non sempre
+        presenti nello stesso ordine.
+        """
+        m_importo = re.search(r"IMPORTO DA PAGARE.*?(\d{1,4}[.,]\d{2})\s*€", testo, re.DOTALL | re.IGNORECASE)
+        m_gas_tot = re.search(r"TOTALE FORNITURA SALVO CONGUAGLIO\s*€?\s*(\d{1,4}[.,]\d{2})", testo, re.DOTALL | re.IGNORECASE)
+        m_gas_smc = re.search(r"CONSUMO GAS.*?(\d+(?:[.,]\d+)?)\s*smc", testo, re.DOTALL | re.IGNORECASE)
+        m_luce_kwh = re.search(r"CONSUMO LUCE.*?(\d+(?:[.,]\d+)?)\s*kWh", testo, re.DOTALL | re.IGNORECASE)
+
+        if not (m_importo and m_gas_tot and m_gas_smc and m_luce_kwh):
+            return None
+
+        importo_totale = converti_numero(m_importo.group(1))
+        gas_totale = converti_numero(m_gas_tot.group(1))
+        luce_totale = round(importo_totale - gas_totale, 2)
+
+        m_rai = re.search(r"canone\s+(rai|tv|abbonamento).*?(\d{1,3}[.,]\d{2})", testo, re.IGNORECASE)
+        rai = converti_numero(m_rai.group(2)) if m_rai else 0.0
+        if rai >= luce_totale:
+            rai = 0.0
+
+        return [
+            {"lordo": gas_totale, "rai": 0.0, "netto": gas_totale,
+             "consumo": converti_numero(m_gas_smc.group(1)), "unita": "smc", "msg": "Gas (bolletta duale)"},
+            {"lordo": luce_totale, "rai": rai, "netto": luce_totale - rai,
+             "consumo": converti_numero(m_luce_kwh.group(1)), "unita": "kwh", "msg": "Luce (bolletta duale)"},
+        ]
 
     def estrai_dati_completi(self, testo):
         regex_totale = re.compile(r"(totale da pagare|totale bolletta|totale fattura|importo totale|totale spesa).*?(\d{1,4}[.,]\d{2})", re.IGNORECASE)

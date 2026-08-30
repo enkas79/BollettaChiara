@@ -1,0 +1,125 @@
+name: Build Installers
+
+# Adattato dal workflow generico "buildinstallers.yml" per BollettaChiara:
+# si attiva quando version.txt cambia su main, costruisce installer Windows
+# (.exe via NSIS), macOS (.dmg) e Debian/Ubuntu (.deb) e li allega a una
+# GitHub Release taggata vX.Y.Z.
+#
+# PREREQUISITI NON ANCORA PRESENTI NEL REPO (da creare prima che questo
+# workflow possa girare con successo):
+#   - main.py                              entry point unificato dell'app
+#   - pyproject.toml con extra "[gui]"     (PyQt6, pdfplumber, matplotlib, reportlab)
+#   - src/bollettachiara/gui/icon.ico      icona applicazione
+#   - packaging/windows/installer.nsi      script NSIS
+#   - packaging/deb/DEBIAN/control         (placeholder __VERSION__)
+#   - packaging/deb/usr/share/applications/bollettachiara.desktop
+# Finché questi file non esistono i job build-windows/build-macos/build-deb
+# falliranno: il trigger su version.txt resta comunque valido per quando la
+# struttura di packaging sarà pronta.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - version.txt
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: echo "version=$(tr -d '[:space:]' < version.txt)" >> "$GITHUB_OUTPUT"
+
+  build-windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[gui]" pyinstaller
+      # onedir (default, senza --onefile): una vera cartella applicazione
+      # sotto Program Files; NSIS impacchetta l'intera dist\BollettaChiara\.
+      - run: pyinstaller --noconfirm --windowed --name BollettaChiara --copy-metadata BollettaChiara --add-data "version.txt;." --add-data "src/bollettachiara/gui/icon.ico;." main.py
+      - name: Install NSIS
+        run: |
+          choco install nsis -y
+          echo "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build installer
+        run: makensis /DVERSION=${{ needs.version.outputs.version }} packaging\windows\installer.nsi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: packaging/windows/BollettaChiara-Setup-${{ needs.version.outputs.version }}.exe
+
+  build-macos:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[gui]" pyinstaller
+      - run: pyinstaller --noconfirm --windowed --name BollettaChiara --copy-metadata BollettaChiara --add-data "version.txt:." --add-data "src/bollettachiara/gui/icon.ico:." main.py
+      - name: Build dmg
+        run: |
+          hdiutil create -volname "BollettaChiara" -srcfolder dist/BollettaChiara.app -ov -format UDZO \
+            "BollettaChiara-${{ needs.version.outputs.version }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: BollettaChiara-${{ needs.version.outputs.version }}.dmg
+
+  build-deb:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[gui]" pyinstaller
+      - run: pyinstaller --noconfirm --onefile --name bollettachiara --copy-metadata BollettaChiara --add-data "version.txt:." --add-data "src/bollettachiara/gui/icon.ico:." main.py
+      - name: Assemble .deb tree
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          PKG_DIR=packaging/deb/build
+          rm -rf "$PKG_DIR"
+          mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/usr/bin" "$PKG_DIR/usr/share/applications"
+          sed "s/__VERSION__/$VERSION/" packaging/deb/DEBIAN/control > "$PKG_DIR/DEBIAN/control"
+          cp dist/bollettachiara "$PKG_DIR/usr/bin/bollettachiara"
+          chmod 755 "$PKG_DIR/usr/bin/bollettachiara"
+          cp packaging/deb/usr/share/applications/bollettachiara.desktop "$PKG_DIR/usr/share/applications/"
+          dpkg-deb --build --root-owner-group "$PKG_DIR" "bollettachiara_${VERSION}_amd64.deb"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: bollettachiara_${{ needs.version.outputs.version }}_amd64.deb
+
+  release:
+    needs: [version, build-windows, build-macos, build-deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: BollettaChiara v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            artifacts/windows-installer/*
+            artifacts/macos-installer/*
+            artifacts/linux-deb/*

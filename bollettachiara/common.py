@@ -56,6 +56,37 @@ class MplCanvas(FigureCanvasQTAgg):
         super().__init__(fig)
 
 
+# Palette pulsanti condivisa tra tutte le schede: stesso ruolo -> stesso
+# colore, stesso padding/border-radius/font-size ovunque. I colori sono
+# scelti con contrasto testo bianco/sfondo >= 4.5:1 (WCAG AA).
+_PALETTE_PULSANTI = {
+    "carica": ("#1565C0", "#0D47A1"),   # blu — azione primaria di caricamento
+    "esporta": ("#6A1B9A", "#4A148C"),  # viola — export/salvataggio
+    "reset": ("#C62828", "#8E0000"),    # rosso — azione distruttiva
+}
+
+
+def stile_pulsante(ruolo):
+    """Restituisce lo stylesheet Qt per un pulsante, uniforme in tutte le schede.
+
+    `ruolo` è una chiave di _PALETTE_PULSANTI ("carica", "esporta", "reset").
+    """
+    colore, colore_hover = _PALETTE_PULSANTI[ruolo]
+    return f"""
+        QPushButton {{
+            background-color: {colore};
+            color: white;
+            font-weight: bold;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+        }}
+        QPushButton:hover {{
+            background-color: {colore_hover};
+        }}
+    """
+
+
 def crea_box_statistica(titolo, widget_valore, colore_testo, font_size="20px"):
     """Crea un box statistico stile card per la sidebar dei riepiloghi."""
     frame = QFrame()

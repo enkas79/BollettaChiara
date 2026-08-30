@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QWidget, QPushButton, QFileDialog, QVBoxLayout,
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtCore import Qt
 
-from .common import converti_numero, estrai_testo, MplCanvas, crea_box_statistica, esporta_pdf_riepilogo
+from .common import converti_numero, estrai_testo, MplCanvas, crea_box_statistica, esporta_pdf_riepilogo, stile_pulsante
 
 
 class EnergiaTab(QWidget):
@@ -27,26 +27,17 @@ class EnergiaTab(QWidget):
         top_layout = QHBoxLayout()
 
         self.btn_load = QPushButton("📂 Carica Bollette")
-        self.btn_load.setStyleSheet("""
-            QPushButton { background-color: #4CAF50; color: white; font-weight: bold; padding: 10px; border-radius: 5px; font-size: 14px; }
-            QPushButton:hover { background-color: #45a049; }
-        """)
+        self.btn_load.setStyleSheet(stile_pulsante("carica"))
         self.btn_load.clicked.connect(self.carica_multipli_pdf)
         top_layout.addWidget(self.btn_load)
 
         self.btn_print = QPushButton("📄 Salva Riepilogo PDF")
-        self.btn_print.setStyleSheet("""
-            QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 10px; border-radius: 5px; font-size: 14px; }
-            QPushButton:hover { background-color: #1976D2; }
-        """)
+        self.btn_print.setStyleSheet(stile_pulsante("esporta"))
         self.btn_print.clicked.connect(self.esporta_riepilogo_pdf)
         top_layout.addWidget(self.btn_print)
 
         self.btn_reset = QPushButton("🗑️ Reset")
-        self.btn_reset.setStyleSheet("""
-            QPushButton { background-color: #FF9800; color: white; font-weight: bold; padding: 10px; border-radius: 5px; font-size: 14px; }
-            QPushButton:hover { background-color: #F57C00; }
-        """)
+        self.btn_reset.setStyleSheet(stile_pulsante("reset"))
         self.btn_reset.clicked.connect(self.reset_tutto)
         top_layout.addWidget(self.btn_reset)
 

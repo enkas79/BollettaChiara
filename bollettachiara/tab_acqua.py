@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QWidget, QPushButton, QFileDialog, QVBoxLayout,
                               QHBoxLayout, QFrame, QMessageBox)
 from PyQt6.QtGui import QFont
 
-from .common import converti_numero, estrai_testo, MplCanvas, esporta_pdf_riepilogo
+from .common import converti_numero, estrai_testo, MplCanvas, esporta_pdf_riepilogo, stile_pulsante
 
 
 class AcquaTab(QWidget):
@@ -25,17 +25,17 @@ class AcquaTab(QWidget):
         btn_layout = QHBoxLayout()
 
         btn_load = QPushButton("📂 Carica PDF ATS")
-        btn_load.setStyleSheet("background-color: #3498DB; color: white; font-weight: bold; padding: 12px; font-size: 14px; border-radius: 6px;")
+        btn_load.setStyleSheet(stile_pulsante("carica"))
         btn_load.clicked.connect(self.carica_pdf)
         btn_layout.addWidget(btn_load)
 
         btn_print = QPushButton("📄 Salva Riepilogo PDF")
-        btn_print.setStyleSheet("background-color: #9B59B6; color: white; font-weight: bold; padding: 12px; font-size: 14px; border-radius: 6px;")
+        btn_print.setStyleSheet(stile_pulsante("esporta"))
         btn_print.clicked.connect(self.esporta_riepilogo_pdf)
         btn_layout.addWidget(btn_print)
 
         btn_reset = QPushButton("🗑️ Reset")
-        btn_reset.setStyleSheet("background-color: #E74C3C; color: white; font-weight: bold; padding: 12px; font-size: 14px; border-radius: 6px;")
+        btn_reset.setStyleSheet(stile_pulsante("reset"))
         btn_reset.clicked.connect(self.reset_tutto)
         btn_layout.addWidget(btn_reset)
 

@@ -1,19 +1,30 @@
-"""Scheda Luce/Gas: estrazione, tabella, statistiche, grafici ed export PDF.
+"""Scheda Luce/Gas: tabella, statistiche, grafici ed export PDF.
 
-Logica di parsing ed export invariata rispetto all'originale BollettaChiara.py,
-riorganizzata come QWidget da inserire in una tab e con le utility condivise
-spostate in bollettachiara.common.
+La logica di parsing vive in bollettachiara.parser (modulo puro testabile);
+qui si orchestrano worker su QThreadPool, presentazione e validazione.
 """
-import re
-from datetime import date
 
-from PyQt6.QtWidgets import (QWidget, QPushButton, QFileDialog, QVBoxLayout,
-                              QLabel, QTableWidget, QTableWidgetItem, QHeaderView,
-                              QHBoxLayout, QFrame, QTabWidget, QMessageBox)
-from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-from .common import converti_numero, estrai_testo, MplCanvas, crea_box_statistica, esporta_pdf_riepilogo, stile_pulsante
+from . import parser
+from .common import MplCanvas, crea_box_statistica, esporta_pdf_riepilogo, stile_pulsante
+from .lavoratori import avvia_parsing
 
 
 class EnergiaTab(QWidget):
@@ -21,6 +32,8 @@ class EnergiaTab(QWidget):
         super().__init__(parent)
         self.dati_ordinati = []
         self.tipo_bolletta = "Bollette"
+        self._progresso = None
+        self._segnali = None
 
         main_layout = QVBoxLayout(self)
 
@@ -63,7 +76,6 @@ class EnergiaTab(QWidget):
         self.setup_tab_consumi()
         self.tabs.addTab(self.tab_consumi, "⚡ Grafico Consumi")
 
-    # --- SETUP TABELLA E SIDEBAR ---
     def setup_tab_dati(self):
         layout = QHBoxLayout()
         layout.setContentsMargins(10, 10, 10, 10)
@@ -78,8 +90,10 @@ class EnergiaTab(QWidget):
 
         self.table.setColumnHidden(2, True)
         self.table.setStyleSheet("""
-            QTableWidget { font-size: 13px; alternate-background-color: #f9f9f9; gridline-color: #ddd; border: 1px solid #ccc; }
-            QHeaderView::section { background-color: #eee; padding: 8px; border: 1px solid #ccc; font-weight: bold; color: #333; }
+            QTableWidget { font-size: 13px; alternate-background-color: #f9f9f9;
+                           gridline-color: #ddd; border: 1px solid #ccc; }
+            QHeaderView::section { background-color: #eee; padding: 8px;
+                                   border: 1px solid #ccc; font-weight: bold; color: #333; }
             QTableWidget::item { padding: 5px; }
         """)
         self.table.setAlternatingRowColors(True)
@@ -125,7 +139,8 @@ class EnergiaTab(QWidget):
         stats_layout.addWidget(crea_box_statistica("Spesa Media Mensile", self.lbl_media_spesa, "#333"))
 
         self.lbl_prezzo_medio = QLabel("---")
-        stats_layout.addWidget(crea_box_statistica("Prezzo Medio Unitario", self.lbl_prezzo_medio, "#2980B9", font_size="22px"))
+        stats_layout.addWidget(crea_box_statistica(
+            "Prezzo Medio Unitario", self.lbl_prezzo_medio, "#2980B9", font_size="22px"))
 
         stats_layout.addStretch()
         layout.addWidget(stats_frame)
@@ -162,8 +177,120 @@ class EnergiaTab(QWidget):
 
     def carica_multipli_pdf(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Seleziona Bollette", "", "PDF Files (*.pdf)")
-        if files:
-            self.analizza_lista_files(files)
+        if not files:
+            return
+        self.reset_tutto()
+        self.btn_load.setEnabled(False)
+        self.btn_print.setEnabled(False)
+        self.btn_reset.setEnabled(False)
+
+        self._progresso = QProgressDialog("Analisi bollette in corso...", "Annulla", 0, len(files), self)
+        self._progresso.setWindowTitle("Caricamento")
+        self._progresso.setMinimumDuration(300)
+
+        self._segnali = avvia_parsing("energia", files)
+        self._segnali.progresso.connect(self._on_progresso)
+        self._segnali.finito.connect(self._on_parsing_finito)
+
+    def _on_progresso(self, attuale, totale, nome):
+        if self._progresso is not None:
+            self._progresso.setMaximum(totale)
+            self._progresso.setValue(attuale)
+            self._progresso.setLabelText(f"Analisi di: {nome} ({attuale}/{totale})")
+
+    def _on_parsing_finito(self, records, saltati):
+        if self._progresso is not None:
+            self._progresso.reset()
+            self._progresso = None
+        self.btn_load.setEnabled(True)
+        self.btn_print.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+
+        records.sort(key=lambda r: (r.data_sort is None, r.data_sort or r.nome_file))
+        self.dati_ordinati = records
+        self.tipo_bolletta = parser.classifica_tipo(records)
+        self._riempi_tabella(records)
+        self._mostra_avvisi(records, saltati)
+
+    def _riempi_tabella(self, records):
+        self.table.setRowCount(0)
+        trovato_rai = any(r.rai > 0 for r in records)
+        unita_rilevata = ""
+        conta_kwh = sum(1 for r in records if r.unita == "kwh")
+        conta_smc = sum(1 for r in records if r.unita in ("smc", "mc"))
+        if conta_kwh >= conta_smc and conta_kwh > 0:
+            unita_rilevata = "kwh"
+        elif conta_smc > 0:
+            unita_rilevata = "smc"
+
+        somma_netta = somma_consumi = somma_rai = 0.0
+
+        for rec in records:
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+
+            display = rec.display if rec.data_sort is not None else f"⚠ {rec.display}"
+            item_mese = QTableWidgetItem(display)
+            if rec.incerto:
+                item_mese.setForeground(QColor("#E67E22"))
+                item_mese.setToolTip("; ".join(rec.avvisi) if rec.avvisi else "Dati parziali")
+            self.table.setItem(row, 0, item_mese)
+
+            self.table.setItem(row, 1, QTableWidgetItem(f"€ {rec.lordo:.2f}"))
+
+            item_rai = QTableWidgetItem(f"€ {rec.rai:.2f}")
+            if rec.rai > 0:
+                item_rai.setForeground(QColor("#C0392B"))
+            self.table.setItem(row, 2, item_rai)
+
+            item_netto = QTableWidgetItem(f"€ {rec.netto:.2f}")
+            item_netto.setFont(QFont("Arial", weight=QFont.Weight.Bold))
+            self.table.setItem(row, 3, item_netto)
+
+            consumo_str = f"{rec.consumo} {rec.unita}" if rec.consumo > 0 else "---"
+            item_cons = QTableWidgetItem(consumo_str)
+            if rec.consumo <= 0:
+                item_cons.setForeground(QColor("#E67E22"))
+            self.table.setItem(row, 4, item_cons)
+
+            p_unit = rec.netto / rec.consumo if rec.consumo > 0 else 0
+            item_prz = QTableWidgetItem(f"€ {p_unit:.3f}")
+            item_prz.setForeground(QColor("#2980B9"))
+            self.table.setItem(row, 5, item_prz)
+
+            self.table.setItem(row, 6, QTableWidgetItem(rec.nome_file))
+
+            somma_netta += rec.netto
+            somma_consumi += rec.consumo
+            somma_rai += rec.rai
+
+        if trovato_rai:
+            self.table.setColumnHidden(2, False)
+
+        self.lbl_totale_soldi.setText(f"€ {somma_netta:.2f}")
+        self.lbl_totale_consumi.setText(f"{somma_consumi:.1f} {unita_rilevata}")
+        self.lbl_totale_rai.setText(f"€ {somma_rai:.2f}")
+
+        avg_cost = somma_netta / len(records) if records else 0
+        self.lbl_media_spesa.setText(f"€ {avg_cost:.2f}")
+
+        if somma_consumi > 0:
+            glob_avg = somma_netta / somma_consumi
+            self.lbl_prezzo_medio.setText(f"€ {glob_avg:.3f} / {unita_rilevata}")
+
+        self.aggiorna_grafici(records, unita_rilevata)
+
+    def _mostra_avvisi(self, records, saltati):
+        messaggi = []
+        if saltati:
+            messaggi.append("File saltati (non leggibili o formato non riconosciuto):\n" + "\n".join(saltati))
+        incerti = [r for r in records if r.incerto]
+        if incerti:
+            righe = [f"• {r.nome_file} — {r.display}: " + ("; ".join(r.avvisi) if r.avvisi else "dati parziali")
+                     for r in incerti]
+            messaggi.append("Bollette con dati parziali (⚠ in tabella):\n" + "\n".join(righe))
+        if messaggi:
+            QMessageBox.warning(self, "Attenzione: dati parziali", "\n\n".join(messaggi))
 
     def esporta_riepilogo_pdf(self):
         if not self.dati_ordinati:
@@ -194,109 +321,15 @@ class EnergiaTab(QWidget):
                                    colore_principale="#2E86C1")
             QMessageBox.information(self, "Successo", f"PDF salvato correttamente:\n{file_path}")
         except Exception as e:
-            QMessageBox.critical(self, "Errore ReportLab", f"Errore durante la creazione del PDF:\n{str(e)}\n\nHai installato la libreria? (pip install reportlab)")
-
-    def analizza_lista_files(self, file_paths):
-        self.reset_tutto()
-        temp_list = []
-        trovato_rai = False
-        unita_rilevata = ""
-        conta_kwh = 0
-        conta_smc = 0
-
-        for path in file_paths:
-            nome_file = path.split("/")[-1]
-            testo = estrai_testo(path)
-            data_obj, display = self.estrai_data_competenza(testo)
-
-            for dati in self.estrai_dati_bolletta(testo):
-                if dati['rai'] > 0:
-                    trovato_rai = True
-
-                if dati['unita'] == 'kwh':
-                    conta_kwh += 1
-                    unita_rilevata = 'kwh'
-                elif dati['unita'] in ['smc', 'mc']:
-                    conta_smc += 1
-                    unita_rilevata = 'smc'
-
-                record = {
-                    'data_sort': data_obj,
-                    'display': display if display else nome_file,
-                    'lordo': dati['lordo'], 'rai': dati['rai'], 'netto': dati['netto'],
-                    'consumo': dati['consumo'], 'unita': dati['unita'], 'msg': dati['msg'],
-                    'nome_file': nome_file
-                }
-                temp_list.append(record)
-
-        if conta_kwh > 0 and conta_smc > 0:
-            self.tipo_bolletta = "Luce e Gas"
-        elif conta_kwh > conta_smc:
-            self.tipo_bolletta = "Luce"
-        elif conta_smc > 0:
-            self.tipo_bolletta = "Gas"
-        else:
-            self.tipo_bolletta = "Bollette"
-
-        self.dati_ordinati = sorted(temp_list, key=lambda x: x['data_sort'])
-
-        somma_netta = 0.0
-        somma_consumi = 0.0
-        somma_rai = 0.0
-
-        for rec in self.dati_ordinati:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-
-            self.table.setItem(row, 0, QTableWidgetItem(rec['display']))
-            self.table.setItem(row, 1, QTableWidgetItem(f"€ {rec['lordo']:.2f}"))
-
-            item_rai = QTableWidgetItem(f"€ {rec['rai']:.2f}")
-            if rec['rai'] > 0:
-                item_rai.setForeground(QColor("#C0392B"))
-            self.table.setItem(row, 2, item_rai)
-
-            item_netto = QTableWidgetItem(f"€ {rec['netto']:.2f}")
-            item_netto.setFont(QFont("Arial", weight=QFont.Weight.Bold))
-            self.table.setItem(row, 3, item_netto)
-
-            consumo_str = f"{rec['consumo']} {rec['unita']}" if rec['consumo'] > 0 else "---"
-            self.table.setItem(row, 4, QTableWidgetItem(consumo_str))
-
-            p_unit = rec['netto'] / rec['consumo'] if rec['consumo'] > 0 else 0
-            item_prz = QTableWidgetItem(f"€ {p_unit:.3f}")
-            item_prz.setForeground(QColor("#2980B9"))
-            self.table.setItem(row, 5, item_prz)
-
-            self.table.setItem(row, 6, QTableWidgetItem(rec['nome_file']))
-
-            somma_netta += rec['netto']
-            somma_consumi += rec['consumo']
-            somma_rai += rec['rai']
-
-        if trovato_rai:
-            self.table.setColumnHidden(2, False)
-
-        self.lbl_totale_soldi.setText(f"€ {somma_netta:.2f}")
-        self.lbl_totale_consumi.setText(f"{somma_consumi:.1f} {unita_rilevata}")
-        self.lbl_totale_rai.setText(f"€ {somma_rai:.2f}")
-
-        avg_cost = somma_netta / len(self.dati_ordinati) if self.dati_ordinati else 0
-        self.lbl_media_spesa.setText(f"€ {avg_cost:.2f}")
-
-        if somma_consumi > 0:
-            glob_avg = somma_netta / somma_consumi
-            self.lbl_prezzo_medio.setText(f"€ {glob_avg:.3f} / {unita_rilevata}")
-
-        self.aggiorna_grafici(self.dati_ordinati, unita_rilevata)
+            QMessageBox.critical(self, "Errore ReportLab", f"Errore durante la creazione del PDF:\n{str(e)}")
 
     def aggiorna_grafici(self, dati, unita):
         if not dati:
             return
 
-        labels = [d['display'] for d in dati]
-        valori_soldi = [d['netto'] for d in dati]
-        valori_consumi = [d['consumo'] for d in dati]
+        labels = [d.display for d in dati]
+        valori_soldi = [d.netto for d in dati]
+        valori_consumi = [d.consumo for d in dati]
 
         ax_costi = self.canvas_costi.axes
         ax_costi.clear()
@@ -309,246 +342,13 @@ class EnergiaTab(QWidget):
 
         ax_cons = self.canvas_consumi.axes
         ax_cons.clear()
+        titolo = f'Andamento Consumi ({unita})' if unita else 'Andamento Consumi'
         ax_cons.plot(labels, valori_consumi, marker='o', linestyle='-', color='#3498DB', linewidth=3)
         ax_cons.fill_between(labels, valori_consumi, color='#3498DB', alpha=0.1)
-        ax_cons.set_title(f'Andamento Consumi ({unita})', fontsize=14, fontweight='bold', color='#333')
+        ax_cons.set_title(titolo, fontsize=14, fontweight='bold', color='#333')
         ax_cons.grid(True, linestyle='--', alpha=0.5)
         ax_cons.tick_params(axis='x', rotation=30, labelsize=10)
         for i, txt in enumerate(valori_consumi):
-            ax_cons.annotate(f"{txt}", (labels[i], valori_consumi[i]), textcoords="offset points", xytext=(0, 10), ha='center', fontweight='bold', color='#2C3E50')
+            ax_cons.annotate(f"{txt}", (labels[i], valori_consumi[i]), textcoords="offset points",
+                             xytext=(0, 10), ha='center', fontweight='bold', color='#2C3E50')
         self.canvas_consumi.draw()
-
-    # --- LOGICHE DI ESTRAZIONE ---
-    def estrai_data_competenza(self, testo):
-        nomi_mesi = ["", "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
-
-        pat_periodo = re.compile(r"PERIODO\s+BOLLETTA\s*(\d{2}\.\d{2}\.\d{4})\s*-\s*(\d{2}\.\d{2}\.\d{4})", re.IGNORECASE)
-        match_periodo = pat_periodo.search(testo)
-        if match_periodo:
-            try:
-                d1, m1, y1 = match_periodo.group(1).split('.')
-                return date(int(y1), int(m1), int(d1)), f"{nomi_mesi[int(m1)]} {y1}"
-            except Exception:
-                pass
-
-        pat_fatturazione = re.compile(r"Periodo\s+di\s+fatturazione\s*:?\s*dal\s*(\d{1,2})[./](\d{1,2})[./](\d{2,4})\s*al\s*(\d{1,2})[./](\d{1,2})[./](\d{2,4})", re.IGNORECASE)
-        match_fatturazione = pat_fatturazione.search(testo)
-        if match_fatturazione:
-            d, m, y = match_fatturazione.group(1), match_fatturazione.group(2), match_fatturazione.group(3)
-            try:
-                return date(int(y), int(m), int(d)), f"{nomi_mesi[int(m)]} {y}"
-            except Exception:
-                pass
-
-        # Formato Eni: "Periodo di riferimento da 3 Febbraio 2018 a 23 Marzo 2018"
-        # (giorno numerico + mese testuale) — controllato prima del fallback numerico
-        # generico sennò questo intercetta erroneamente altre date in bolletta (es.
-        # "prossima bolletta prevista per il ...").
-        mesi_alt_eni = "gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre"
-        pat_periodo_riferimento = re.compile(
-            rf"Periodo\s+di\s+riferimento.{{0,40}}?da\s+(\d{{1,2}})\s+({mesi_alt_eni})\s+(20\d{{2}})",
-            re.IGNORECASE | re.DOTALL)
-        match_periodo_riferimento = pat_periodo_riferimento.search(testo)
-        if match_periodo_riferimento:
-            gg, nm, anno = match_periodo_riferimento.group(1), match_periodo_riferimento.group(2).lower(), match_periodo_riferimento.group(3)
-            try:
-                idx = {m.lower(): i for i, m in enumerate(nomi_mesi) if m}[nm]
-                return date(int(anno), idx, int(gg)), f"{nm.capitalize()} {anno}"
-            except Exception:
-                pass
-
-        # Formato Enel: "Periodo di riferimento gennaio - febbraio 2014" (mesi testuali,
-        # non date numeriche) — va controllato prima del fallback numerico generico
-        # sennò questo intercetta erroneamente altre finestre di date in bolletta
-        # (es. "può comunicare la lettura del contatore dal ... al ...").
-        mesi_alt = "gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre"
-        pat_periodo_mese = re.compile(
-            rf"Periodo(?:\s+di\s+riferimento)?\s+({mesi_alt})\s*[-–]?\s*(?:{mesi_alt})?\s+(20\d{{2}})",
-            re.IGNORECASE)
-        match_periodo_mese = pat_periodo_mese.search(testo)
-        if match_periodo_mese:
-            nm = match_periodo_mese.group(1).lower()
-            anno = match_periodo_mese.group(2)
-            try:
-                idx = {m.lower(): i for i, m in enumerate(nomi_mesi) if m}[nm]
-                return date(int(anno), idx, 1), f"{nm.capitalize()} {anno}"
-            except Exception:
-                pass
-
-        # NB: pattern generico "dd/mm/yyyy al dd/mm/yyyy" — usato come fallback perché
-        # può intercettare per errore altre finestre di date presenti in bolletta
-        # (es. "prossima autolettura dal ... al ...") invece del vero periodo fatturato.
-        pat_range = re.compile(r"(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\s*(?:al|-)\s*(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})", re.IGNORECASE)
-        match_range = pat_range.search(testo)
-        if match_range:
-            d, m, y = match_range.group(1), match_range.group(2), match_range.group(3)
-            if len(y) == 2:
-                y = "20" + y
-            try:
-                return date(int(y), int(m), int(d)), f"{nomi_mesi[int(m)]} {y}"
-            except Exception:
-                pass
-
-        mesi_dict = {m.lower(): i for i, m in enumerate(nomi_mesi) if m}
-        pat_mese = re.compile(r"\b(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+(20\d{2})\b", re.IGNORECASE)
-        match = pat_mese.search(testo)
-        if match:
-            nm = match.group(1).lower()
-            anno = match.group(2)
-            idx = mesi_dict[nm]
-            return date(int(anno), idx, 1), f"{nm.capitalize()} {anno}"
-
-        return date(2999, 1, 1), None
-
-    def estrai_dati_bolletta(self, testo):
-        """Restituisce una lista di dict dati estratti dal testo del PDF.
-
-        Normalmente una sola bolletta (un solo tipo di utenza) -> un solo
-        elemento. Alcuni fornitori (es. ENGIE) emettono un'unica bolletta
-        che copre sia luce che gas: in quel caso vengono restituiti due
-        elementi (uno per la fornitura gas, uno per quella elettrica).
-        """
-        if re.search(r"CONSUMO GAS", testo, re.IGNORECASE) and re.search(r"CONSUMO LUCE", testo, re.IGNORECASE):
-            dati_duali = self._estrai_dati_luce_gas_combinata(testo)
-            if dati_duali:
-                return dati_duali
-        return [self.estrai_dati_completi(testo)]
-
-    def _estrai_dati_luce_gas_combinata(self, testo):
-        """Estrae luce e gas da una bolletta unica in stile ENGIE.
-
-        La prima pagina riporta un riepilogo con l'importo totale e i due
-        consumi (es. "IMPORTO DA PAGARE ... CONSUMO GAS" seguito da
-        "491,05 € ... 136 smc", e più sotto "CONSUMO LUCE" con "461 kWh").
-        Il totale della fornitura gas si legge dal dettaglio ("TOTALE
-        FORNITURA SALVO CONGUAGLIO € 246,67"); il totale della fornitura
-        elettrica (canone RAI incluso) si ricava per differenza dal totale
-        bolletta, evitando di dipendere da pagine successive non sempre
-        presenti nello stesso ordine.
-        """
-        m_importo = re.search(r"IMPORTO DA PAGARE.*?(\d{1,4}[.,]\d{2})\s*€", testo, re.DOTALL | re.IGNORECASE)
-        m_gas_tot = re.search(r"TOTALE FORNITURA SALVO CONGUAGLIO\s*€?\s*(\d{1,4}[.,]\d{2})", testo, re.DOTALL | re.IGNORECASE)
-        m_gas_smc = re.search(r"CONSUMO GAS.*?(\d+(?:[.,]\d+)?)\s*smc", testo, re.DOTALL | re.IGNORECASE)
-        m_luce_kwh = re.search(r"CONSUMO LUCE.*?(\d+(?:[.,]\d+)?)\s*kWh", testo, re.DOTALL | re.IGNORECASE)
-
-        if not (m_importo and m_gas_tot and m_gas_smc and m_luce_kwh):
-            return self._estrai_dati_luce_gas_eni(testo)
-
-        importo_totale = converti_numero(m_importo.group(1))
-        gas_totale = converti_numero(m_gas_tot.group(1))
-        luce_totale = round(importo_totale - gas_totale, 2)
-
-        m_rai = re.search(r"canone\s+(?:di\s+)?(rai|tv|abbonamento).*?(\d{1,3}[.,]\d{2})", testo, re.IGNORECASE)
-        rai = converti_numero(m_rai.group(2)) if m_rai else 0.0
-        if rai >= luce_totale:
-            rai = 0.0
-
-        return [
-            {"lordo": gas_totale, "rai": 0.0, "netto": gas_totale,
-             "consumo": converti_numero(m_gas_smc.group(1)), "unita": "smc", "msg": "Gas (bolletta duale)"},
-            {"lordo": luce_totale, "rai": rai, "netto": luce_totale - rai,
-             "consumo": converti_numero(m_luce_kwh.group(1)), "unita": "kwh", "msg": "Luce (bolletta duale)"},
-        ]
-
-    def _estrai_dati_luce_gas_eni(self, testo):
-        """Estrae luce e gas da una bolletta unica in stile Eni gas e luce.
-
-        Formato diverso da ENGIE: niente "IMPORTO DA PAGARE" né "TOTALE
-        FORNITURA SALVO CONGUAGLIO". Il riepilogo di pagina 1 ("Consumo gas
-        ... Consumo luce ...") in queste bollette ha un layout a due colonne
-        che pdfplumber estrae interlacciato con testo di un riquadro laterale,
-        quindi si usano invece gli importi/consumi del dettaglio di pagina 2
-        ("Totale gas** 99,41 €", "Totale fornitura gas smc 127", "Totale
-        luce** 75,55 €", "Totale fornitura luce kWh 393"), su una sola colonna
-        e quindi affidabili.
-        """
-        m_gas_tot = re.search(r"Totale\s+gas\**\s*(\d{1,4}[.,]\d{2})\s*€", testo, re.IGNORECASE)
-        m_gas_smc = re.search(r"Totale\s+fornitura\s+gas\s+smc\s*(\d+(?:[.,]\d+)?)", testo, re.IGNORECASE)
-        m_luce_tot = re.search(r"Totale\s+luce\**\s*(\d{1,4}[.,]\d{2})\s*€", testo, re.IGNORECASE)
-        m_luce_kwh = re.search(r"Totale\s+fornitura\s+luce\s+kWh\s*(\d+(?:[.,]\d+)?)", testo, re.IGNORECASE)
-
-        if not (m_gas_tot and m_gas_smc and m_luce_tot and m_luce_kwh):
-            return None
-
-        gas_totale = converti_numero(m_gas_tot.group(1))
-        luce_netto = converti_numero(m_luce_tot.group(1))
-
-        m_rai = re.search(r"canone\s+(?:di\s+)?(rai|tv|abbonamento).*?(\d{1,3}[.,]\d{2})", testo, re.IGNORECASE)
-        rai = converti_numero(m_rai.group(2)) if m_rai else 0.0
-
-        luce_totale = round(luce_netto + rai, 2)
-
-        return [
-            {"lordo": gas_totale, "rai": 0.0, "netto": gas_totale,
-             "consumo": converti_numero(m_gas_smc.group(1)), "unita": "smc", "msg": "Gas (bolletta duale Eni)"},
-            {"lordo": luce_totale, "rai": rai, "netto": luce_netto,
-             "consumo": converti_numero(m_luce_kwh.group(1)), "unita": "kwh", "msg": "Luce (bolletta duale Eni)"},
-        ]
-
-    def estrai_dati_completi(self, testo):
-        regex_totale = re.compile(r"(totale da pagare|totale bolletta|totale fattura|importo totale|totale spesa).*?(\d{1,4}[.,]\d{2})", re.IGNORECASE)
-        match_list = regex_totale.findall(testo)
-        val_lordo = max([converti_numero(m[1]) for m in match_list]) if match_list else 0.0
-
-        regex_rai = re.compile(r"(canone\s+(?:di\s+)?(rai|tv|abbonamento)).*?(\d{1,3}[.,]\d{2})", re.IGNORECASE)
-        m_rai = regex_rai.search(testo)
-        val_rai = converti_numero(m_rai.group(3)) if m_rai else 0.0
-        if val_rai >= val_lordo:
-            val_rai = 0.0
-
-        consumo = 0.0
-        unita = "?"
-        msg = "OK"
-
-        reg_gas_pulsee = re.compile(r"CONSUMI\s+FATTURATI\s+IN\s+TOTALE.*?IN\s+QUESTA\s+BOLLETTA:?\s*(\d+[.,]\d+)\s*(smc|mc|kwh)", re.DOTALL | re.IGNORECASE)
-        m_gas = reg_gas_pulsee.search(testo)
-
-        # Formato Enel: "Consumo Fatturato kWh 379" (unità PRIMA del numero); usa questo
-        # pattern per primo perché "consumi fatturati" da solo può agganciare per errore
-        # etichette come "F1 kWh" nella tabella delle letture.
-        reg_consumo_fatturato = re.compile(r"consumo\s+fatturato\s*(kwh|smc|mc)\D{0,15}(\d{1,5}(?:[.,]\d{1,2})?)", re.IGNORECASE | re.DOTALL)
-        m_consumo_fatt = reg_consumo_fatturato.search(testo)
-
-        reg_std = re.compile(r"(?:consumi\s+fatturati|consumo\s+totale|totale\s+consumi).*?(\d{1,5}(?:[.,]\d{1,2})?)\s*(kwh|smc|mc)", re.IGNORECASE | re.DOTALL)
-        m_std = reg_std.search(testo)
-
-        # Formato Ascotrade: "TOTALE CONSUMO FATTURATO 400,00" senza unità di misura
-        # adiacente al numero (l'unità compare solo più avanti, es. "Euro/Kwh").
-        reg_tot_fatturato = re.compile(r"totale\s+consumo\s+fatturato\D{0,5}(\d{1,5}[.,]\d{1,2})(.{0,80})", re.IGNORECASE | re.DOTALL)
-        m_tot_fatt = reg_tot_fatturato.search(testo)
-
-        if m_gas:
-            consumo = converti_numero(m_gas.group(1))
-            unita = m_gas.group(2).lower()
-            msg = "Gas Pulsee"
-        elif m_consumo_fatt:
-            consumo = converti_numero(m_consumo_fatt.group(2))
-            unita = m_consumo_fatt.group(1).lower()
-            msg = "Consumo Fatturato"
-        elif m_std:
-            consumo = converti_numero(m_std.group(1))
-            unita = m_std.group(2).lower()
-            msg = "Standard"
-        elif m_tot_fatt:
-            consumo = converti_numero(m_tot_fatt.group(1))
-            unita_match = re.search(r"kwh|smc|mc", m_tot_fatt.group(2), re.IGNORECASE)
-            unita = unita_match.group(0).lower() if unita_match else "kwh"
-            msg = "Totale Consumo Fatturato"
-        else:
-            reg_fasce = re.compile(r"F1.*?(\d+[.,]\d+).*?F2.*?(\d+[.,]\d+).*?F3.*?(\d+[.,]\d+)", re.DOTALL | re.IGNORECASE)
-            m_fasce = reg_fasce.search(testo)
-            if m_fasce:
-                f1 = converti_numero(m_fasce.group(1))
-                f2 = converti_numero(m_fasce.group(2))
-                f3 = converti_numero(m_fasce.group(3))
-                if f1 + f2 + f3 > 0:
-                    consumo = f1 + f2 + f3
-                    unita = "kwh"
-                    msg = "Somma Fasce"
-            else:
-                msg = "N.D."
-
-        if unita == "mc":
-            unita = "smc"
-
-        return {"lordo": val_lordo, "rai": val_rai, "netto": val_lordo - val_rai, "consumo": consumo, "unita": unita, "msg": msg}

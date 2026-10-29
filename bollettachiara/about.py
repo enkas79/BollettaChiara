@@ -1,22 +1,13 @@
 """Dialoghi 'Informazioni' e 'Guida' del menu Aiuto, come richiesto da CLAUDE.md."""
-from pathlib import Path
-
 from PyQt6.QtWidgets import QMessageBox
+
+from .versioni import leggi_versione_locale
 
 AUTORE = "Enkas79"
 
 
-def leggi_versione():
-    """Legge la versione corrente da version.txt nella root del progetto."""
-    version_path = Path(__file__).resolve().parent.parent / "version.txt"
-    try:
-        return version_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return "sconosciuta"
-
-
 def mostra_informazioni(parent):
-    versione = leggi_versione()
+    versione = leggi_versione_locale() or "sconosciuta"
     QMessageBox.about(
         parent,
         "Informazioni su BollettaChiara",
@@ -41,5 +32,6 @@ def mostra_guida(parent):
         "<li>Usa <b>Reset</b> per svuotare i dati caricati nella scheda corrente.</li>"
         "</ol>"
         "<p>I dati vengono estratti dal testo dei PDF: se una bolletta ha un "
-        "layout non riconosciuto, alcuni campi potrebbero risultare a 0 o '---'.</p>",
+        "layout non riconosciuto, i campi mancanti sono evidenziati con ⚠ "
+        "e segnalati in un avviso.</p>",
     )

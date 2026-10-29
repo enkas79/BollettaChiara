@@ -1,48 +1,45 @@
 """Utilità condivise tra le schede Energia (Luce/Gas) e Acqua.
 
-Contiene l'estrazione testo PDF, la conversione numeri in formato IT,
-il canvas Matplotlib e l'export PDF di riepilogo (entrambi identici nei
-due script originali BollettaChiara.py e AcquaChiara.py).
+Contiene l'estrazione testo PDF (con eccezioni, non più print silenziose),
+il canvas Matplotlib, gli stili condivisi e l'export PDF di riepilogo
+multi-pagina.
 """
-import pdfplumber
+import logging
+from datetime import date
+from pathlib import Path
 
 import matplotlib
+import pdfplumber
+
 matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-
-from PyQt6.QtWidgets import QFrame, QVBoxLayout, QLabel
+from PyQt6.QtWidgets import QFrame, QLabel, QVBoxLayout
 
 try:
+    from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as pdf_canvas
-    from reportlab.lib import colors
     REPORTLAB_OK = True
 except ImportError:
     REPORTLAB_OK = False
 
-from datetime import date
-
-
-def converti_numero(s):
-    """Converte una stringa numerica in formato italiano (1.234,56) in float."""
-    try:
-        return float(s.replace('.', '').replace(',', '.'))
-    except Exception:
-        return 0.0
+log = logging.getLogger(__name__)
 
 
 def estrai_testo(path, max_pagine=2):
-    """Estrae il testo delle prime `max_pagine` pagine di un PDF."""
+    """Estrae il testo delle prime `max_pagine` pagine di un PDF.
+
+    Solleva eccezioni in caso di file illeggibile: il chiamante (worker
+    su thread separato) le intercetta e le riporta all'utente.
+    """
+    path = Path(path)
     full_text = ""
-    try:
-        with pdfplumber.open(path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                if i >= max_pagine:
-                    break
-                full_text += (page.extract_text() or "") + "\n"
-    except Exception as e:
-        print(f"Errore lettura {path}: {e}")
+    with pdfplumber.open(str(path)) as pdf:
+        for i, page in enumerate(pdf.pages):
+            if i >= max_pagine:
+                break
+            full_text += (page.extract_text() or "") + "\n"
     return full_text
 
 
@@ -56,21 +53,15 @@ class MplCanvas(FigureCanvasQTAgg):
         super().__init__(fig)
 
 
-# Palette pulsanti condivisa tra tutte le schede: stesso ruolo -> stesso
-# colore, stesso padding/border-radius/font-size ovunque. I colori sono
-# scelti con contrasto testo bianco/sfondo >= 4.5:1 (WCAG AA).
 _PALETTE_PULSANTI = {
-    "carica": ("#1565C0", "#0D47A1"),   # blu — azione primaria di caricamento
-    "esporta": ("#6A1B9A", "#4A148C"),  # viola — export/salvataggio
-    "reset": ("#C62828", "#8E0000"),    # rosso — azione distruttiva
+    "carica": ("#1565C0", "#0D47A1"),
+    "esporta": ("#6A1B9A", "#4A148C"),
+    "reset": ("#C62828", "#8E0000"),
 }
 
 
 def stile_pulsante(ruolo):
-    """Restituisce lo stylesheet Qt per un pulsante, uniforme in tutte le schede.
-
-    `ruolo` è una chiave di _PALETTE_PULSANTI ("carica", "esporta", "reset").
-    """
+    """Restituisce lo stylesheet Qt per un pulsante, uniforme in tutte le schede."""
     colore, colore_hover = _PALETTE_PULSANTI[ruolo]
     return f"""
         QPushButton {{
@@ -114,45 +105,56 @@ def crea_box_statistica(titolo, widget_valore, colore_testo, font_size="20px"):
 
 def esporta_pdf_riepilogo(file_path, titolo_report, sezioni, colore_principale="#2E86C1",
                            footer_text="Documento generato da BollettaChiara"):
-    """Genera un PDF di riepilogo A4 con header colorato e sezioni a righe etichetta/valore.
+    """Genera un PDF di riepilogo A4 con header colorato e sezioni a righe.
 
     `sezioni` è una lista di tuple (nome_sezione, righe) dove righe è una
     lista di tuple (etichetta, valore, colore_valore_hex_o_None).
+    Se il contenuto supera una pagina, continua su pagine aggiuntive
+    ripetendo header e footer.
     """
     if not REPORTLAB_OK:
         raise RuntimeError("Libreria 'reportlab' mancante. Esegui 'pip install reportlab'.")
 
-    c = pdf_canvas.Canvas(file_path, pagesize=A4)
+    c = pdf_canvas.Canvas(str(file_path), pagesize=A4)
     width, height = A4
+    margine_inf = 70
 
-    c.setStrokeColor(colors.HexColor(colore_principale))
-    c.setLineWidth(2)
-    c.line(50, height - 50, width - 50, height - 50)
-
-    c.setFont("Helvetica-Bold", 24)
-    c.setFillColor(colors.HexColor(colore_principale))
-    c.drawCentredString(width / 2, height - 90, titolo_report)
-
-    c.setFont("Helvetica", 10)
-    c.setFillColor(colors.black)
-    c.drawCentredString(width / 2, height - 110, f"Generato il: {date.today().strftime('%d/%m/%Y')}")
+    def nuova_pagina():
+        c.setStrokeColor(colors.HexColor(colore_principale))
+        c.setLineWidth(2)
+        c.line(50, height - 50, width - 50, height - 50)
+        c.setFont("Helvetica-Bold", 24)
+        c.setFillColor(colors.HexColor(colore_principale))
+        c.drawCentredString(width / 2, height - 90, titolo_report)
+        c.setFont("Helvetica", 10)
+        c.setFillColor(colors.black)
+        c.drawCentredString(width / 2, height - 110, f"Generato il: {date.today().strftime('%d/%m/%Y')}")
+        c.setFont("Helvetica", 8)
+        c.setFillColor(colors.gray)
+        c.drawCentredString(width / 2, 50, footer_text)
 
     def disegna_riga(y, etichetta, valore, colore_valore=colors.black):
+        if y < margine_inf:
+            c.showPage()
+            nuova_pagina()
+            y = height - 160
         c.setFillColor(colors.whitesmoke)
         c.rect(50, y - 5, width - 100, 30, fill=1, stroke=0)
-
         c.setFont("Helvetica-Bold", 12)
         c.setFillColor(colors.darkslategray)
         c.drawString(70, y + 5, etichetta)
-
         c.setFont("Helvetica-Bold", 14)
         c.setFillColor(colore_valore)
         c.drawRightString(width - 70, y + 5, str(valore))
-
         return y - 40
 
+    nuova_pagina()
     y_pos = height - 160
     for nome_sezione, righe in sezioni:
+        if y_pos - 60 < margine_inf:
+            c.showPage()
+            nuova_pagina()
+            y_pos = height - 160
         c.setFillColor(colors.HexColor(colore_principale))
         c.rect(50, y_pos, width - 100, 25, fill=1, stroke=0)
         c.setFillColor(colors.white)
@@ -165,9 +167,5 @@ def esporta_pdf_riepilogo(file_path, titolo_report, sezioni, colore_principale="
             y_pos = disegna_riga(y_pos, etichetta, valore, colore)
 
         y_pos -= 20
-
-    c.setFont("Helvetica", 8)
-    c.setFillColor(colors.gray)
-    c.drawCentredString(width / 2, 50, footer_text)
 
     c.save()

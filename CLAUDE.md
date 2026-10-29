@@ -32,7 +32,7 @@
 * **Gestione Errori:** Intercetta le eccezioni di rete o I/O silenziosamente in background o tramite dialoghi chiari (`QMessageBox.warning`/`QMessageBox.critical`) se l'azione è manuale, impedendo qualsiasi crash improvviso.
 
 ## 5. Comandi di Sviluppo & Test
-* **Esecuzione App:** `python src/main.py`
+* **Esecuzione App:** `python main.py`
 * **Test Suite:** `pytest` (priorità alla logica interna e modelli)
 * **Linter / Formatting:** `ruff check . --fix` (in alternativa `black .` / `flake8 .`)
 * **Dipendenze:** `pip freeze > requirements.txt`

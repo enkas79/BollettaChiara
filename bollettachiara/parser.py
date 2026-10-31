@@ -106,6 +106,22 @@ def estrai_data_competenza(testo):
         except (KeyError, ValueError):
             pass
 
+    # Formato Sorgenia: "Periodo di fatturazione Settembre 2026" (mese
+    # testuale, senza date numeriche). Va controllato PRIMA di
+    # pat_periodo_mese: in queste bollette lo scontrino di pagina 2
+    # contiene anche "Periodo Ottobre 2026" (riga del canone RAI,
+    # addebitato nel mese successivo), che il pattern generico
+    # intercetterebbe per primo dando il mese sbagliato.
+    pat_fatturazione_mese = re.compile(
+        rf"Periodo\s+di\s+fatturazione\s*:?\s*({_MESI_ALT})\s+(20\d{{2}})",
+        re.IGNORECASE)
+    match_fatt_mese = pat_fatturazione_mese.search(testo)
+    if match_fatt_mese:
+        nm = match_fatt_mese.group(1).lower()
+        anno = match_fatt_mese.group(2)
+        idx = _MESI_DICT[nm]
+        return date(int(anno), idx, 1), f"{nm.capitalize()} {anno}"
+
     pat_periodo_mese = re.compile(
         rf"Periodo(?:\s+di\s+riferimento)?\s+({_MESI_ALT})\s*[-–]?\s*(?:{_MESI_ALT})?\s+(20\d{{2}})",
         re.IGNORECASE)

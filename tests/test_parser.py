@@ -46,6 +46,23 @@ def test_estrai_data_nessun_match_ritorna_none():
     assert label is None
 
 
+def test_estrai_data_sorgenia_periodo_fatturazione_mese():
+    """Sorgenia: pagina 1 ha 'Periodo di fatturazione Settembre 2026', ma lo
+    scontrino di pagina 2 contiene 'Periodo Ottobre 2026' (riga canone RAI).
+    Il parser deve prendere Settembre, non Ottobre."""
+    testo = (
+        "Periodo di fatturazione Settembre 2026\n"
+        "Consumo totale del periodo fatturato 199,8 kWh\n"
+        "...\n"
+        "Canone di abbonamento alla televisione per uso privato 9,00 €\n"
+        "Periodo Ottobre 2026 9,00 €\n"
+        "TOTALE DA PAGARE 104,43 €\n"
+    )
+    d, label = parser.estrai_data_competenza(testo)
+    assert d == date(2026, 9, 1)
+    assert label == "Settembre 2026"
+
+
 def test_estrai_dati_bolletta_enel():
     testo = """
     Totale da pagare 123,45 €
